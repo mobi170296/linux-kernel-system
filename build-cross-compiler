@@ -1,0 +1,213 @@
+#!/bin/bash
+# This script uses to build cross-toolchain as LFS 10.0
+
+set -e
+WORKING_DIR=$PWD
+SOURCE_HOME=$(dirname $(readlink -f $0))
+LOG_FILE=$SOURCE_HOME/build.log
+DEST=/opt/cross
+TARGET=x86_64-mg-linux
+ARCH=x86_64
+export PATH=$DEST/host/bin:$PATH
+export MAKEFLAGS='-j4 '
+
+download()
+{
+    wget http://ftp.gnu.org/gnu/binutils/binutils-2.35.tar.xz
+    wget http://ftp.gnu.org/gnu/gcc/gcc-10.2.0/gcc-10.2.0.tar.xz
+    wget http://www.mpfr.org/mpfr-4.1.0/mpfr-4.1.0.tar.xz
+    wget http://ftp.gnu.org/gnu/gmp/gmp-6.2.0.tar.xz
+    wget https://ftp.gnu.org/gnu/mpc/mpc-1.1.0.tar.gz
+    wget https://www.kernel.org/pub/linux/kernel/v5.x/linux-5.8.3.tar.xz
+    wget http://ftp.gnu.org/gnu/glibc/glibc-2.32.tar.xz
+    wget http://www.linuxfromscratch.org/patches/lfs/10.0/glibc-2.32-fhs-1.patch
+}
+
+counter=0
+show_time()
+{
+    while true
+    do
+        echo -ne "\r$counter"
+        counter=$(($counter+1))
+        sleep 1
+    done
+}
+
+# Delete existing log file
+rm -rf $LOG_FILE
+
+# Download necessary files
+echo "Downloading necessary files"
+download >> $LOG_FILE 2>&1
+
+# Create necessary directory to target directory
+echo "Create necessary directory on target"
+mkdir -pv $DEST/target/usr/{bin,lib,sbin} >> $LOG_FILE 2>&1
+ln -svf usr/bin $DEST/target/bin >> $LOG_FILE 2>&1
+ln -svf usr/lib $DEST/target/lib >> $LOG_FILE 2>&1
+ln -svf usr/sbin $DEST/target/sbin >> $LOG_FILE 2>&1
+ln -svf lib $DEST/target/lib64 >> $LOG_FILE 2>&1
+ln -svf ../lib/ld-linux-x86-64.so.2 $DEST/target/lib64 >> $LOG_FILE 2>&1
+ln -svf ../lib/ld-linux-x86-64.so.2 $DEST/target/lib64/ld-lsb-x86-64.so.3 >> $LOG_FILE 2>&1
+
+# Building binutils Pass 1
+echo "Building binutils - Pass 1"
+cd $SOURCE_HOME
+tar xvf binutils-2.35.tar.xz >> $LOG_FILE 2>&1
+cd binutils-2.35 >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+../configure --prefix=$DEST/host \
+--with-sysroot=$DEST/target \
+--target=$TARGET \
+--disable-nls \
+--disable-werror >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make install >> $LOG_FILE 2>&1
+
+# Building gcc Pass 1
+echo "Building GCC - Pass 1"
+cd $SOURCE_HOME
+tar xvf gcc-10.2.0.tar.xz >> $LOG_FILE 2>&1
+cd gcc-10.2.0 >> $LOG_FILE 2>&1
+tar -xvf ../mpfr-4.1.0.tar.xz >> $LOG_FILE 2>&1
+mv -v mpfr-4.1.0 mpfr >> $LOG_FILE 2>&1
+tar -xvf ../gmp-6.2.0.tar.xz >> $LOG_FILE 2>&1
+mv -v gmp-6.2.0 gmp >> $LOG_FILE 2>&1
+tar -xvf ../mpc-1.1.0.tar.gz >> $LOG_FILE 2>&1
+mv -v mpc-1.1.0 mpc >> $LOG_FILE 2>&1
+sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64 >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+../configure --target=$TARGET \
+--prefix=$DEST/host \
+--with-glibc-version=2.11 \
+--with-sysroot=$DEST/target \
+--with-newlib \
+--without-headers \
+--enable-initfini-array \
+--disable-nls \
+--disable-shared \
+--disable-multilib \
+--disable-decimal-float \
+--disable-threads \
+--disable-libatomic \
+--disable-libgomp \
+--disable-libquadmath \
+--disable-libssp \
+--disable-libvtv \
+--disable-libstdcxx \
+--enable-languages=c,c++ >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make install >> $LOG_FILE 2>&1
+cd .. >> $LOG_FILE 2>&1
+cat gcc/limitx.h gcc/glimits.h gcc/limity.h > \
+$(dirname $($TARGET-gcc -print-libgcc-file-name))/install-tools/include/limits.h
+
+# Building linux kernel header files
+echo "Installing linux kernel header files to target"
+cd $SOURCE_HOME >> $LOG_FILE 2>&1
+tar xvf linux-5.8.3.tar.xz >> $LOG_FILE 2>&1
+cd linux-5.8.3 >> $LOG_FILE 2>&1
+make mrproper >> $LOG_FILE 2>&1
+make ARCH=$ARCH headers >> $LOG_FILE 2>&1
+find usr/include -name ".*" -delete >> $LOG_FILE 2>&1
+rm usr/include/Makefile >> $LOG_FILE 2>&1
+cp -rv usr/include $DEST/target/usr >> $LOG_FILE 2>&1
+
+# Building glibc
+echo "Building glibc"
+cd $SOURCE_HOME >> $LOG_FILE 2>&1
+tar xvf glibc-2.32.tar.xz >> $LOG_FILE 2>&1
+cd glibc-2.32 >> $LOG_FILE 2>&1
+patch -Np1 -i ../glibc-2.32-fhs-1.patch >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+../configure --prefix=/usr \
+--host=$TARGET \
+--build=$(../scripts/config.guess) \
+--enable-kernel=3.2 \
+--with-headers=$DEST/target/usr/include \
+libc_cv_slibdir=/lib >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make DESTDIR=$DEST/target install >> $LOG_FILE 2>&1
+$DEST/host/libexec/gcc/$TARGET/10.2.0/install-tools/mkheaders >> $LOG_FILE 2>&1
+
+# Building libstdc++
+echo "Building libstdc++"
+cd $SOURCE_HOME >> $LOG_FILE 2>&1
+rm -rf gcc-10.2.0 >> $LOG_FILE 2>&1
+tar xvf gcc-10.2.0.tar.xz >> $LOG_FILE 2>&1
+cd gcc-10.2.0 >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+../libstdc++-v3/configure \
+--host=$TARGET \
+--build=$(../config.guess) \
+--prefix=$DEST/target/usr \
+--disable-multilib \
+--disable-libstdcxx-pch \
+--with-gxx-include-dir=$DEST/host/$TARGET/include/c++/10.2.0 >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make install >> $LOG_FILE 2>&1
+
+# Building binutils Pass 2
+echo "Building binutil - Pass 2"
+cd $SOURCE_HOME >> $LOG_FILE 2>&1
+rm -rf binutils-2.35 >> $LOG_FILE 2>&1
+tar xvf binutils-2.35.tar.xz >> $LOG_FILE 2>&1
+cd binutils-2.35 >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+../configure --prefix=$DEST/target/usr \
+--build=$(../config.guess) \
+--host=$TARGET \
+--disable-nls \
+--enable-shared \
+--disable-werror \
+--enable-64-bit-bfd >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make install >> $LOG_FILE 2>&1
+
+# Building gcc Pass 2
+echo "Building GCC - Pass 2"
+cd $SOURCE_HOME >> $LOG_FILE 2>&1
+rm -rf gcc-10.2.0 >> $LOG_FILE 2>&1
+tar xvf gcc-10.2.0.tar.xz >> $LOG_FILE 2>&1
+cd gcc-10.2.0 >> $LOG_FILE 2>&1
+tar -xvf ../mpfr-4.1.0.tar.xz >> $LOG_FILE 2>&1
+mv -v mpfr-4.1.0 mpfr >> $LOG_FILE 2>&1
+tar -xvf ../gmp-6.2.0.tar.xz >> $LOG_FILE 2>&1
+mv -v gmp-6.2.0 gmp >> $LOG_FILE 2>&1
+tar -xvf ../mpc-1.1.0.tar.gz >> $LOG_FILE 2>&1
+mv -v mpc-1.1.0 mpc >> $LOG_FILE 2>&1
+sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64 >> $LOG_FILE 2>&1
+mkdir -pv build >> $LOG_FILE 2>&1
+cd build >> $LOG_FILE 2>&1
+mkdir -pv $TARGET/libgcc >> $LOG_FILE 2>&1
+ln -s ../../../libgcc/gthr-posix.h $TARGET/libgcc/gthr-default.h >> $LOG_FILE 2>&1
+../configure --build=$(../config.guess) \
+--host=$TARGET \
+--prefix=$DEST/target/usr \
+CC_FOR_TARGET=$TARGET-gcc \
+--with-build-sysroot=$DEST/target \
+--enable-initfini-array \
+--disable-nls \
+--disable-multilib \
+--disable-decimal-float \
+--disable-libatomic \
+--disable-libgomp \
+--disable-libquadmath \
+--disable-libssp \
+--disable-libvtv \
+--disable-libstdcxx \
+--enable-languages=c,c++ >> $LOG_FILE 2>&1
+make >> $LOG_FILE 2>&1
+make install >> $LOG_FILE 2>&1
+ln -sv gcc $DEST/target/usr/bin/cc >> $LOG_FILE 2>&1
+
+# Back to working directory
+cd $WORKING_DIR
+
+echo "Done!"
